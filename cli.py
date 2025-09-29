@@ -22,8 +22,8 @@ except ImportError:
     date_parser = None
 
 # Import our modules
-from contracts import ToolType, ToolExecution, Plan
-from agents import PlannerAgent, DeliberationCore, ReviewerAgent, NotifierAgent
+from contracts import ToolType, ToolExecution
+from agents import NotifierAgent
 from tools import GmailToolAgent, PipedriveToolAgent, CalendlyToolAgent
 from memory import MemoryAgent
 from config_store import CredentialsStore
@@ -44,10 +44,7 @@ class CrewAIWorkflowCLI:
         self.document_manager = DocumentManager(Path("user_documents"))
         self.documents_dir = self.document_manager.base_dir
 
-        # Initialize agents
-        self.planner = PlannerAgent(llm_client=self.llm, documents_dir=self.documents_dir)
-        self.deliberation_core = DeliberationCore(llm_client=self.llm)
-        self.reviewer = ReviewerAgent(confidence_threshold=0.7, llm_client=self.llm)
+        # No agents needed for hybrid approach - using direct LLM calls
         
         # Tool agents (will be initialized after credentials)
         self.tool_agents = {}
@@ -65,6 +62,8 @@ class CrewAIWorkflowCLI:
             "original_query": None
         }
         self.current_task_type = None  # "email", "crm", "calendly", None
+        # Track which single field we are currently asking for (one-at-a-time UX)
+        self.current_prompt_field = None  # ("email", "subject") or ("crm", "name") etc.
         
     def run(self):
         """Main entry point for the CLI application."""
@@ -163,94 +162,6 @@ class CrewAIWorkflowCLI:
 
         return True
 
-    def _find_step(self, plan: Plan, tool_type: ToolType):
-        for step in plan.steps:
-            if step.tool_required == tool_type:
-                return step
-        return None
-
-    def _map_missing_label(self, label: str, plan: Plan) -> Optional[Dict[str, Any]]:
-        label_lower = label.lower()
-        if "email recipient" in label_lower:
-            step = self._find_step(plan, ToolType.GMAIL)
-            if step:
-                return {"label": label, "field": "to", "prompt": "Who should receive the email?", "step": step}
-        if "email subject" in label_lower:
-            step = self._find_step(plan, ToolType.GMAIL)
-            if step:
-                return {"label": label, "field": "subject", "prompt": "What subject line would you like?", "step": step}
-        if "report summary" in label_lower or "summary" in label_lower:
-            step = self._find_step(plan, ToolType.GMAIL)
-            if step:
-                prompt = (
-                    "Please share the notes to summarize. Paste the text or provide "
-                    "the filename (e.g., meeting.pdf) after placing it in the documents folder."
-                )
-                return {"label": label, "field": "summary_content", "prompt": prompt, "step": step}
-        if "meeting date" in label_lower:
-            step = self._find_step(plan, ToolType.CALENDLY)
-            if step:
-                prompt = "Which date should I check availability for? (YYYY-MM-DD or phrases like today/tomorrow)"
-                return {"label": label, "field": "date", "prompt": prompt, "step": step}
-        return None
-
-    def _build_missing_items(self, plan: Plan) -> List[Dict[str, Any]]:
-        items: List[Dict[str, Any]] = []
-        for label in plan.missing_info:
-            mapping = self._map_missing_label(label, plan)
-            if mapping:
-                items.append(mapping)
-        plan.missing_info = []
-        return items
-
-    def _auto_resolve_missing_items(self) -> None:
-        if not self.pending_plan or not self.pending_missing_items:
-            return
-
-        for item in list(self.pending_missing_items):
-            field = item.get("field")
-            if field == "summary_content":
-                success, content, error, source_path = self.document_manager.load_latest_document_text()
-                if success and content and content.strip():
-                    self._apply_missing_answer(item, content.strip())
-                    source_label = source_path.name if source_path else "document"
-                    self.console.print(f"📄 Loaded notes from {source_label}", style="green")
-                    self.pending_missing_items.remove(item)
-                    continue
-
-                if error:
-                    self.console.print(f"ℹ️ {error}", style="yellow")
-                self.console.print(
-                    f"Drop your notes file into {self.documents_dir} and tell me its name, or paste the notes directly.",
-                    style="yellow"
-                )
-                continue
-
-    def _ask_next_missing_question(self) -> None:
-        if not self.pending_plan:
-            return
-        if not self.pending_missing_items:
-            plan = self.pending_plan
-            self.pending_plan = None
-            self._execute_plan(plan)
-            return
-        current = self.pending_missing_items[0]
-        question = None
-        if self.llm and self.llm.is_available():
-            question = self.llm.generate_clarification_question(
-                self.pending_plan.user_query,
-                [current["label"]],
-            )
-        if not question:
-            question = current.get("prompt", "Could you provide more detail?")
-        current["last_prompt"] = question
-        self.console.print(question, style="cyan")
-
-    def _apply_missing_answer(self, item: Dict[str, Any], answer: str) -> None:
-        step = item.get("step")
-        field = item.get("field")
-        if step and field:
-            step.parameters[field] = answer
 
     def handle_missing_info_response(self, user_input: str) -> bool:
         if not self.current_task_type:
@@ -275,40 +186,325 @@ class CrewAIWorkflowCLI:
         self.pending_email = {"to": None, "subject": None, "content": None, "original_query": None}
         self.pending_crm = {"name": None, "email": None, "original_query": None}
         self.current_task_type = None
+        self.current_prompt_field = None
     
     def _clear_pending_email(self):
         """Clear pending email state."""
         self.pending_email = {"to": None, "subject": None, "content": None, "original_query": None}
         self.current_task_type = None
+        self.current_prompt_field = None
     
     def _handle_email_followup(self, text: str) -> bool:
         """Handle email follow-up responses."""
-        self._extract_email_info(text)
+        # Handle recipient input for hybrid approach
+        if self.current_prompt_field == ("email", "to"):
+            self._assign_email_field_from_text("to", text)
+            if self.pending_email["to"]:
+                # We have recipient, now check if we have enough info to generate content
+                original_query = self.pending_email["original_query"]
+                content_requirement = self.pending_email.get("content_requirement")
+                document_reference = self.pending_email.get("document_reference")
+                
+                # Only auto-generate if we have specific content requirements or document references
+                if content_requirement or document_reference:
+                    try:
+                        # Generate body using LLM
+                        body = self._generate_email_body_with_llm(
+                            original_query, 
+                            content_requirement, 
+                            document_reference
+                        )
+                        self.pending_email["content"] = body
+                        
+                        # Generate subject if not provided
+                        if not self.pending_email["subject"]:
+                            self.pending_email["subject"] = self._generate_subject_from_query(original_query, body)
+                        
+                        # Send email
+                        self._send_email()
+                        self._clear_pending_email()
+                        return True
+                        
+                    except Exception as e:
+                        self.console.print(f"❌ Error generating email content: {str(e)}", style="red")
+                else:
+                    # Ask for subject first, then content
+                    self.current_prompt_field = ("email", "subject")
+                    self.console.print("❓ What should be the email subject?", style="yellow")
+                    return True
+            return True
         
+        # Handle subject input
+        elif self.current_prompt_field == ("email", "subject"):
+            self._assign_email_field_from_text("subject", text)
+            if self.pending_email["subject"]:
+                # Got subject, now ask for content
+                self.current_prompt_field = ("email", "content")
+                self.console.print("❓ What should be the email content?", style="yellow")
+                return True
+        
+        # Handle content input
+        elif self.current_prompt_field == ("email", "content"):
+            self._assign_email_field_from_text("content", text)
+            if self.pending_email["content"]:
+                # Got content, now send email
+                self._send_email()
+                self._clear_pending_email()
+                return True
+        else:
+            # No specific field set yet: seed from free text but do not over-capture
+            self._extract_email_info(text)
+
         if self._is_email_complete():
             self._send_email()
             self._clear_pending_email()
-        else:
-            missing = self._get_missing_email_info()
-            self.console.print(f"\n❓ I still need: {', '.join(missing)}", style="yellow")
+            return True
+
+        # Ask for next single missing field
+        self._prompt_next_email_field()
         return True
     
     def _handle_crm_followup(self, text: str) -> bool:
         """Handle CRM follow-up responses."""
-        self._extract_crm_info(text)
-        
+        # If we are asking for a specific field, map reply ONLY to that field
+        if self.current_prompt_field == ("crm", "name"):
+            self._assign_crm_field_from_text("name", text)
+        elif self.current_prompt_field == ("crm", "email"):
+            self._assign_crm_field_from_text("email", text)
+        else:
+            # No specific field set yet: seed from free text
+            self._extract_crm_info(text)
+
         if self._is_crm_complete():
             self._add_crm_contact()
             self._clear_pending_crm()
-        else:
-            missing = self._get_missing_crm_info()
-            self.console.print(f"\n❓ I still need: {', '.join(missing)}", style="yellow")
+            return True
+
+        # Ask for next single missing field
+        self._prompt_next_crm_field()
         return True
     
     def _clear_pending_crm(self):
         """Clear pending CRM state."""
         self.pending_crm = {"name": None, "email": None, "original_query": None}
         self.current_task_type = None
+        self.current_prompt_field = None
+    
+    # ---------- Prompting helpers (one-at-a-time) ----------
+    def _prompt_next_email_field(self):
+        """Ask for the next missing email field one at a time."""
+        missing = self._get_missing_email_info()
+        if "recipient email" in missing:
+            self.current_prompt_field = ("email", "to")
+            self.console.print("❓ Please provide the recipient email address:", style="yellow")
+            return
+        if "subject" in missing:
+            self.current_prompt_field = ("email", "subject")
+            self.console.print("❓ What should be the email subject?", style="yellow")
+            return
+        if "content" in missing:
+            self.current_prompt_field = ("email", "content")
+            self.console.print("❓ What should be the email content?", style="yellow")
+            return
+
+    def _prompt_next_crm_field(self):
+        """Ask for the next missing CRM field one at a time."""
+        missing = self._get_missing_crm_info()
+        if "contact name" in missing:
+            self.current_prompt_field = ("crm", "name")
+            self.console.print("❓ Please provide the contact name:", style="yellow")
+            return
+        if "email address" in missing:
+            self.current_prompt_field = ("crm", "email")
+            self.console.print("❓ Please provide the contact email address:", style="yellow")
+            return
+
+    # ---------- Strict field assignment ----------
+    def _assign_email_field_from_text(self, field: str, text: str):
+        """Assign text to a specific email field with validation."""
+        import re
+        if field == "to":
+            email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+            match = re.search(email_pattern, text)
+            if match:
+                self.pending_email["to"] = match.group(0)
+                self.console.print(f"✅ Got recipient: {match.group(0)}", style="green")
+            else:
+                self.console.print("⚠️ That doesn't look like a valid email. Please enter a valid recipient email:", style="yellow")
+        elif field == "subject":
+            # Take the whole line as subject, but trim markers and trailing commas
+            subj = text.strip()
+            # Remove common subject prefixes: "subject:", "subject -", "subject would be", "subject is"
+            subj = re.sub(r'^(subject\s*(would\s+be|is|:|-)\s*)', '', subj, flags=re.IGNORECASE).strip()
+            subj = re.sub(r'[\s,]+$', '', subj)
+            if subj:
+                self.pending_email["subject"] = subj
+                self.console.print(f"✅ Got subject: {subj}", style="green")
+            else:
+                self.console.print("⚠️ Please provide a non-empty subject:", style="yellow")
+        elif field == "content":
+            # Accept either free text or directives like 'summary of JP.txt'
+            if any(doc_indicator in text.lower() for doc_indicator in ["jp.txt", "document", ".txt", ".md", ".pdf"]):
+                # Process document with LLM based on user requirements
+                try:
+                    processed_content = self._process_document_request(text)
+                    if processed_content:
+                        self.pending_email["content"] = processed_content
+                        self.console.print(f"✅ Got processed content ({len(processed_content)} characters)", style="green")
+                        return
+                except Exception as e:
+                    self.console.print(f"❌ Error processing document: {str(e)}", style="red")
+            
+            if len(text.strip()) > 10:
+                self.pending_email["content"] = text.strip()
+                self.console.print(f"✅ Got content ({len(text.strip())} characters)", style="green")
+            else:
+                self.console.print("⚠️ Please provide the email content:", style="yellow")
+
+    def _process_document_request(self, text: str) -> str:
+        """Process document content based on user requirements using LLM."""
+        import re
+        
+        # Extract document file name
+        document_file = None
+        words = text.split()
+        for word in words:
+            clean_word = word.strip('.,!?()[]{}":;')
+            if '.' in clean_word and any(clean_word.lower().endswith(ext) for ext in ['.txt', '.md', '.pdf', '.doc', '.docx']):
+                if (self.documents_dir / clean_word).exists():
+                    document_file = clean_word
+                    break
+        
+        # If no specific file found, look for jp.txt or any document
+        if not document_file:
+            if "jp.txt" in text.lower() and (self.documents_dir / "JP.txt").exists():
+                document_file = "JP.txt"
+            elif "document" in text.lower():
+                # Find first available document
+                for file_path in self.documents_dir.iterdir():
+                    if file_path.is_file() and file_path.suffix.lower() in ['.txt', '.md', '.pdf']:
+                        document_file = file_path.name
+                        break
+        
+        if not document_file:
+            return "Document not found."
+        
+        # Load document content
+        try:
+            doc_path = self.documents_dir / document_file
+            raw_content = doc_path.read_text(encoding='utf-8').strip()
+            self.console.print(f"✅ Loaded content from {document_file} ({len(raw_content)} characters)", style="green")
+            
+            # Process based on user requirements
+            return self._generate_processed_content(raw_content, text)
+            
+        except Exception as e:
+            return f"Error loading document: {str(e)}"
+    
+    def _generate_processed_content(self, raw_content: str, user_request: str) -> str:
+        """Generate processed content using LLM based on user requirements."""
+        import re
+        
+        if not self.llm or not self.llm.is_available():
+            return "LLM not available for content processing."
+        
+        request_lower = user_request.lower()
+        
+        try:
+            # Determine processing type based on user requirement
+            if any(word in request_lower for word in ["bullet", "points"]):
+                # Extract number of bullet points
+                bullet_match = re.search(r'(\d+)\s*(?:bullet\s*)?points?', request_lower)
+                num_points = bullet_match.group(1) if bullet_match else "5"
+                
+                prompt = f"""Please create {num_points} key bullet points from the following content for an email:
+
+{raw_content}
+
+Make it:
+- Professional and clear
+- {num_points} concise bullet points
+- Highlight the most important information
+- Suitable for email communication
+
+Format as:
+• Point 1
+• Point 2
+etc.
+
+Key Points:"""
+                
+            elif any(word in request_lower for word in ["line", "lines"]):
+                # Extract number of lines
+                line_match = re.search(r'(\d+)\s*lines?', request_lower)
+                num_lines = line_match.group(1) if line_match else "3"
+                
+                prompt = f"""Please create a {num_lines}-line professional summary of the following content for an email:
+
+{raw_content}
+
+Make it:
+- Exactly {num_lines} lines
+- Professional and engaging
+- Concise and impactful
+- Suitable for email communication
+
+{num_lines}-line summary:"""
+                
+            elif any(word in request_lower for word in ["summary", "summarize"]):
+                prompt = f"""Please create a concise professional summary of the following content for an email:
+
+{raw_content}
+
+Make it:
+- Professional and engaging
+- Concise (2-3 paragraphs max)
+- Suitable for email communication
+- Highlight key achievements and skills
+
+Summary:"""
+                
+            else:
+                # Default to summary
+                prompt = f"""Please create a professional summary of the following content for an email:
+
+{raw_content}
+
+Make it professional and suitable for email communication.
+
+Summary:"""
+            
+            response = self.llm.client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=500,
+                temperature=0.7
+            )
+            return response.choices[0].message.content.strip()
+            
+        except Exception as e:
+            return f"Error processing content with LLM: {str(e)}"
+
+    def _assign_crm_field_from_text(self, field: str, text: str):
+        """Assign text to a specific CRM field with validation."""
+        import re
+        if field == "email":
+            email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+            match = re.search(email_pattern, text)
+            if match:
+                self.pending_crm["email"] = match.group(0)
+                self.console.print(f"✅ Got email: {match.group(0)}", style="green")
+            else:
+                self.console.print("⚠️ That doesn't look like a valid email. Please enter a valid contact email:", style="yellow")
+        elif field == "name":
+            name = text.strip()
+            name = re.sub(r'^(name\s*(is)?\s*[-:]?)', '', name, flags=re.IGNORECASE).strip()
+            name = name.strip('"\' ')
+            if name:
+                self.pending_crm["name"] = name
+                self.console.print(f"✅ Got name: {name}", style="green")
+            else:
+                self.console.print("⚠️ Please provide a non-empty name:", style="yellow")
     
     def _extract_email_info(self, text: str):
         """Extract email info from text and store it."""
@@ -322,25 +518,45 @@ class CrewAIWorkflowCLI:
         
         # Extract subject
         if "subject" in text.lower():
-            # Look for patterns like "subject: X", "subject - X", or "subject would be X"
-            subject_match = re.search(r'subject[:\s-]+(?:would be\s+|is\s+)?([^,.\n]+?)(?:\s*,|\s*$)', text, re.IGNORECASE)
+            # Look for patterns like "subject: X", "subject - X", "subject would be X", "subject is X"
+            subject_match = re.search(r'subject\s*(?:would\s+be|is|:|-)\s*([^,.\n]+?)(?:\s*,|\s*$)', text, re.IGNORECASE)
             if subject_match and not self.pending_email["subject"]:
                 self.pending_email["subject"] = subject_match.group(1).strip()
         
         # Check for document references and load content
-        if "jp.txt" in text.lower() or "document" in text.lower():
-            jp_path = self.documents_dir / "JP.txt"
-            if jp_path.exists() and not self.pending_email["content"]:
-                try:
-                    raw_content = jp_path.read_text(encoding='utf-8').strip()
-                    
-                    # Use LLM to process content based on user request
-                    processed_content = self._process_content_with_llm(raw_content, text)
-                    self.pending_email["content"] = processed_content
-                    
-                    self.console.print(f"✅ Processed content from JP.txt using AI ({len(processed_content)} characters)", style="green")
-                except Exception as e:
-                    self.console.print(f"⚠️ Could not load JP.txt: {e}", style="yellow")
+        document_extensions = ['.txt', '.md', '.pdf', '.doc', '.docx', '.json', '.csv']
+        document_file = None
+        
+        # Look for specific file mentions or "document" keyword
+        if "document" in text.lower():
+            # Find first available document
+            if self.documents_dir.exists():
+                for file_path in self.documents_dir.iterdir():
+                    if file_path.is_file() and file_path.suffix.lower() in document_extensions:
+                        document_file = file_path.name
+                        break
+        else:
+            # Look for specific file mentions
+            words = text.split()
+            for word in words:
+                clean_word = word.strip('.,!?()[]{}":;')
+                if '.' in clean_word and any(clean_word.lower().endswith(ext) for ext in document_extensions):
+                    potential_file = self.documents_dir / clean_word
+                    if potential_file.exists():
+                        document_file = clean_word
+                        break
+        
+        if document_file and not self.pending_email["content"]:
+            try:
+                doc_path = self.documents_dir / document_file
+                raw_content = doc_path.read_text(encoding='utf-8').strip()
+                
+                # Store raw content - LLM processing now handled in hybrid approach
+                self.pending_email["content"] = raw_content
+                
+                self.console.print(f"✅ Loaded content from {document_file} ({len(raw_content)} characters)", style="green")
+            except Exception as e:
+                self.console.print(f"⚠️ Could not load {document_file}: {e}", style="yellow")
         
         # If no document reference, treat the text as content (but not if it's just an email request)
         elif not self.pending_email["content"] and len(text) > 20:
@@ -436,105 +652,6 @@ class CrewAIWorkflowCLI:
         except Exception as e:
             self.console.print(f"❌ Error sending email: {str(e)}", style="red")
 
-    def _process_content_with_llm(self, raw_content: str, user_request: str) -> str:
-        """Process document content using LLM based on user request."""
-        try:
-            if not self.llm:
-                return raw_content
-            
-            # Determine what the user wants to do with the content
-            request_lower = user_request.lower()
-            
-            if any(word in request_lower for word in ["summary", "summarize", "summarise"]):
-                prompt = f"""Please create a concise professional summary of the following content for an email:
-
-{raw_content}
-
-Make it:
-- Professional and engaging
-- Concise (2-3 paragraphs max)
-- Suitable for email communication
-- Highlight key achievements and skills
-
-Summary:"""
-                
-                response = self.llm.client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=500,
-                    temperature=0.7
-                )
-                return response.choices[0].message.content.strip()
-            
-            elif any(word in request_lower for word in ["brief", "short", "concise"]):
-                prompt = f"""Please create a brief, professional version of the following content for an email:
-
-{raw_content}
-
-Make it:
-- Very concise (1-2 paragraphs)
-- Professional tone
-- Include only the most important points
-
-Brief version:"""
-                
-                response = self.llm.client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=300,
-                    temperature=0.7
-                )
-                return response.choices[0].message.content.strip()
-            
-            else:
-                # Default: return raw content
-                return raw_content
-                
-        except Exception as e:
-            self.console.print(f"⚠️ Could not process content with AI: {e}", style="yellow")
-            return raw_content
-
-    def _handle_crm_request(self, query: str):
-        """Handle CRM contact requests with simple extraction."""
-        import re
-        
-        # Extract email
-        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-        emails = re.findall(email_pattern, query)
-        
-        # Extract name (look for "name" keyword)
-        name = None
-        if "name" in query.lower():
-            # Look for patterns like "name - John Doe" or "name is John"
-            name_match = re.search(r'name[:\s-]+([A-Za-z\s]+?)(?:\s+and|\s+email|$)', query, re.IGNORECASE)
-            if name_match:
-                name = name_match.group(1).strip()
-        
-        if emails and name:
-            try:
-                if ToolType.PIPEDRIVE in self.tool_agents:
-                    pipedrive_agent = self.tool_agents[ToolType.PIPEDRIVE]
-                    result = pipedrive_agent.execute("create_contact", {
-                        "name": name,
-                        "email": emails[0]
-                    })
-                    
-                    if result.success:
-                        self.console.print(f"✅ Contact '{name}' added to Pipedrive with email {emails[0]}", style="green")
-                        self.notifier.send_notification("task_completed", "Contact added successfully!")
-                    else:
-                        self.console.print(f"❌ Failed to add contact: {result.error}", style="red")
-                else:
-                    self.console.print("❌ Pipedrive not configured", style="red")
-            except Exception as e:
-                self.console.print(f"❌ Error adding contact: {str(e)}", style="red")
-        else:
-            missing = []
-            if not name:
-                missing.append("contact name")
-            if not emails:
-                missing.append("email address")
-            self.console.print(f"❓ I need: {', '.join(missing)}", style="yellow")
 
     def _handle_calendly_request(self, query: str):
         """Handle Calendly availability requests."""
@@ -600,28 +717,6 @@ Brief version:"""
             # Fallback to raw data
             self.console.print(str(data), style="dim")
 
-    def request_additional_info(self, plan: Plan) -> None:
-        self.pending_plan = plan
-        
-        # Use LLM-generated follow-up question if available
-        if hasattr(self.planner, '_current_analysis') and self.planner._current_analysis:
-            follow_up_question = self.planner._current_analysis.get("follow_up_question")
-            if follow_up_question:
-                self.console.print(f"\n❓ {follow_up_question}", style="yellow")
-                return
-        
-        # Fallback to generic question
-        missing_info_text = ", ".join(plan.missing_info)
-        if self.llm_client and self.llm_client.is_available():
-            try:
-                question = self.llm_client.generate_clarification_question(plan.user_query, plan.missing_info)
-                self.console.print(f"\n❓ {question}", style="yellow")
-                return
-            except Exception:
-                pass
-        
-        # Final fallback
-        self.console.print(f"\n❓ I need more information: {missing_info_text}", style="yellow")
 
     def initialize_tool_agents(self):
         """Initialize tool agents with credentials."""
@@ -664,8 +759,7 @@ Brief version:"""
         
         # Add rows
         table.add_row("🧠 Memory Agent", "✅ Active", f"Stored interactions: {memory_stats.get('total_interactions', 0)}")
-        table.add_row("📋 Planner Agent", "✅ Ready", "Task planning and breakdown")
-        table.add_row("🔍 Reviewer Agent", "✅ Ready", f"Confidence threshold: {self.reviewer.confidence_threshold}")
+        table.add_row("📋 Email System", "✅ Ready", "Hybrid deterministic + LLM approach")
         table.add_row("📢 Notifier Agent", "✅ Ready", "Real-time notifications")
         
         # Gmail status with method details
@@ -759,21 +853,12 @@ Brief version:"""
                 self._add_crm_contact()
                 self._clear_pending_crm()
             else:
-                missing = self._get_missing_crm_info()
-                self.console.print(f"\n❓ I need: {', '.join(missing)}", style="yellow")
+                self._prompt_next_crm_field()
         
         # EMAIL DETECTION
         elif any(word in query_lower for word in ["send email", "email to", "send mail"]) or (any(word in query_lower for word in ["email", "send", "mail"]) and not any(word in query_lower for word in ["contact", "crm", "pipedrive"])):
-            self.current_task_type = "email"
-            self.pending_email["original_query"] = user_query
-            self._extract_email_info(user_query)
-            
-            if self._is_email_complete():
-                self._send_email()
-                self._clear_pending_email()
-            else:
-                missing = self._get_missing_email_info()
-                self.console.print(f"\n❓ I need: {', '.join(missing)}", style="yellow")
+            # Always use hybrid approach: deterministic extraction + LLM for body
+            self._handle_email_hybrid(user_query)
         
         # CALENDLY DETECTION  
         elif any(word in query_lower for word in ["calendar", "meeting", "schedule", "available", "calendly"]):
@@ -784,166 +869,9 @@ Brief version:"""
         else:
             self.console.print("Hello! I can help you with:\n• 📧 Email (Gmail)\n• 👥 Contacts (Pipedrive CRM)\n• 📅 Calendar (Calendly)\n\nWhat would you like to do?", style="cyan")
     
-    def handle_user_review(self, draft, review_result) -> bool:
-        """Handle user review of drafts that need approval."""
-        self.console.print("\n🔍 Draft Review Required", style="bold yellow")
-        
-        # Show confidence score
-        confidence_color = "green" if review_result.confidence_score >= 0.7 else "yellow" if review_result.confidence_score >= 0.5 else "red"
-        self.console.print(f"Confidence Score: {review_result.confidence_score:.2f}", style=confidence_color)
-        
-        # Show issues if any
-        if review_result.issues:
-            self.console.print("\n⚠️ Issues Found:", style="red")
-            for issue in review_result.issues:
-                self.console.print(f"  • {issue}", style="red")
-        
-        # Show suggestions if any
-        if review_result.suggestions:
-            self.console.print("\n💡 Suggestions:", style="yellow")
-            for suggestion in review_result.suggestions:
-                self.console.print(f"  • {suggestion}", style="yellow")
-        
-        # Show draft content
-        self.console.print("\n📄 Draft Content:", style="bold")
-        draft_panel = Panel(
-            json.dumps(draft.content, indent=2),
-            title=f"{draft.task_type.value.title()} Draft",
-            border_style="blue"
-        )
-        self.console.print(draft_panel)
-        
-        # Ask for user approval
-        return Confirm.ask("\n✅ Do you want to proceed with this draft?")
     
-    def _execute_plan(self, plan: Plan) -> None:
-        plan.is_complete = True
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=self.console
-        ) as progress:
-            task = progress.add_task("📝 Generating draft...", total=None)
-            try:
-                draft = self.deliberation_core.generate_draft(plan)
-                progress.update(task, description="🔍 Reviewing draft...")
-                review_result = self.reviewer.review_draft(draft)
-                progress.update(task, description="✅ Processing complete")
-            except RuntimeError as e:
-                progress.update(task, description="❌ Draft generation failed")
-                self.console.print(f"\n❌ [bold red]Error generating content:[/bold red] {str(e)}")
-                self.console.print("\n💡 [yellow]Suggestions:[/yellow]")
-                self.console.print("• Check your OpenAI API key is valid and has credits")
-                self.console.print("• Try rephrasing your request more naturally")
-                self.console.print("• Ensure all required information is provided")
-                self.notifier.send_notification("task_failed", f"Content generation failed: {str(e)}")
-                return
-            except Exception as e:
-                progress.update(task, description="❌ Unexpected error")
-                self.console.print(f"\n❌ [bold red]Unexpected error:[/bold red] {str(e)}")
-                self.notifier.send_notification("task_failed", f"Unexpected error: {str(e)}")
-                return
 
-        if review_result.requires_user_review:
-            if not self.handle_user_review(draft, review_result):
-                self.notifier.send_notification("task_failed", "Task cancelled by user")
-                return
-
-        execution_results = self.execute_draft(draft, plan)
-        self.store_interaction_memory(plan.user_query, plan, draft, execution_results)
-        self.notifier.send_notification("task_completed", "Task completed successfully!")
-
-    def execute_draft(self, draft, plan):
-        """Execute the approved draft using appropriate tool agents."""
-        self.console.print("\n🚀 Executing approved draft...", style="bold green")
-        
-        execution_results = []
-        
-        for step in plan.steps:
-            action = step.parameters.get("action", "default_action")
-
-            if step.tool_required == ToolType.GENERAL or action == "general_assistance":
-                message = draft.content.get("message") if isinstance(draft.content, dict) else None
-                if not message and self.llm and self.llm.is_available():
-                    message = self.llm.generate_general_response(plan.user_query)
-                if not message:
-                    message = "I'm here to help with Gmail email tasks, Pipedrive CRM contact management, and share Calendly availability. Let me know what you'd like to do next."
-
-                self.console.print(f"\n💬 {message}\n", style="cyan")
-                execution_results.append(ToolExecution(
-                    execution_id=f"general_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                    tool_type=ToolType.GENERAL,
-                    action=action,
-                    parameters=step.parameters,
-                    success=True,
-                    result={"message": message}
-                ))
-                continue
-
-            if step.tool_required in self.tool_agents:
-                tool_agent = self.tool_agents[step.tool_required]
-
-                # Merge step parameters with draft content
-                execution_params = {**step.parameters, **draft.content}
-                
-                # Execute the tool action
-                result = tool_agent.execute(action, execution_params)
-                execution_results.append(result)
-                
-                if result.success:
-                    self.console.print(f"✅ {step.description}", style="green")
-                    if step.tool_required == ToolType.CALENDLY:
-                        self._display_calendly_slots(result)
-                else:
-                    self.console.print(f"❌ {step.description}: {result.error}", style="red")
-                    if step.tool_required == ToolType.CALENDLY:
-                        self._display_calendly_slots(result)
-            else:
-                self.console.print(f"⚠️ Tool not available: {step.tool_required.value}", style="yellow")
-                execution_results.append(ToolExecution(
-                    execution_id=f"missing_tool_{step.tool_required.value}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                    tool_type=step.tool_required,
-                    action=action,
-                    parameters=step.parameters,
-                    success=False,
-                    error="Tool not available"
-                ))
-                continue
-
-        return execution_results
     
-    def _display_calendly_slots(self, execution_result: ToolExecution) -> None:
-        result = execution_result.result or {}
-        date_label = result.get("date_label", "the selected date")
-        slots = result.get("slots", [])
-        total_slots = result.get("total_slots", 0)
-        scheduling_link = result.get("scheduling_link")
-        meeting_duration = result.get("meeting_duration")
-        timezone_info = result.get("timezone")
-
-        if execution_result.success:
-            if slots:
-                self.console.print(f"\n📅 Available slots for {date_label}:", style="green")
-                for i, slot in enumerate(slots, 1):
-                    label = slot.get("label", "Available slot")
-                    self.console.print(f"  {i}. {label}", style="cyan")
-                
-                if total_slots > len(slots):
-                    remaining = total_slots - len(slots)
-                    self.console.print(f"  ... and {remaining} more slots", style="dim")
-            else:
-                self.console.print(f"\n📅 No available slots found for {date_label}", style="yellow")
-        else:
-            error_msg = execution_result.error or "Failed to fetch availability"
-            self.console.print(f"\n❌ {error_msg}", style="red")
-        
-        if meeting_duration and timezone_info:
-            self.console.print(f"\n⏱️  Duration: {meeting_duration} | 🌍 Timezone: {timezone_info}", style="dim")
-        
-        if scheduling_link:
-            self.console.print(f"🔗 Book via Calendly: {scheduling_link}", style="green")
-        
-        self.console.print("")
 
     def _normalize_date_input(self, text: str) -> Optional[str]:
         if not text:
@@ -971,35 +899,6 @@ Brief version:"""
                 return None
         return None
 
-    def store_interaction_memory(
-        self,
-        user_query: str,
-        plan,
-        draft,
-        execution_results: Optional[List[ToolExecution]] = None):
-        """Store the interaction in memory for future reference."""
-        try:
-            execution_results = execution_results or []
-            success_count = sum(1 for result in execution_results if result.success)
-            plan_summary = (
-                f"Created {len(plan.steps)} steps using tools: {[t.value for t in plan.required_tools]}"
-            )
-            if execution_results:
-                plan_summary += f" | Success: {success_count}/{len(execution_results)}"
-            sentiment = "positive" if execution_results and success_count == len(execution_results) else "neutral"
-
-            memory_entry = self.memory_agent.create_memory_entry(
-                user_query=user_query,
-                plan_summary=plan_summary,
-                execution_results=execution_results,
-                sentiment=sentiment,
-                tags=[draft.task_type.value, "cli_interaction"]
-            )
-
-            self.memory_agent.store_interaction(memory_entry)
-
-        except Exception as e:
-            self.console.print(f"⚠️ Failed to store interaction in memory: {e}", style="yellow")
 
     def show_help(self):
         """Display help information."""
@@ -1055,6 +954,275 @@ Brief version:"""
                 timestamp = interaction.get('timestamp', 'Unknown')
                 query = interaction.get('user_query', 'No query')[:50] + "..." if len(interaction.get('user_query', '')) > 50 else interaction.get('user_query', 'No query')
                 self.console.print(f"{i}. [{timestamp[:19]}] {query}", style="dim")
+    
+    def _handle_email_hybrid(self, user_query: str):
+        """Handle email requests using hybrid approach: deterministic extraction + LLM for body."""
+        self.current_task_type = "email"
+        self.pending_email["original_query"] = user_query
+        
+        # Deterministic extraction of all email components
+        email_data = self._extract_email_data_deterministic(user_query)
+        
+        # Store extracted data
+        if email_data["to"]:
+            self.pending_email["to"] = email_data["to"]
+        if email_data["subject"]:
+            self.pending_email["subject"] = email_data["subject"]
+        
+        # Check if we have recipient
+        if not self.pending_email["to"]:
+            self.current_prompt_field = ("email", "to")
+            self.console.print("❓ Please provide the recipient email address:", style="yellow")
+            # Store content requirement for later LLM processing
+            self.pending_email["content_requirement"] = email_data["content_requirement"]
+            self.pending_email["document_reference"] = email_data["document_reference"]
+            return
+        
+        # Generate body using LLM
+        try:
+            body = self._generate_email_body_with_llm(
+                user_query, 
+                email_data["content_requirement"], 
+                email_data["document_reference"]
+            )
+            self.pending_email["content"] = body
+            
+            # Generate subject if not provided
+            if not self.pending_email["subject"]:
+                self.pending_email["subject"] = self._generate_subject_from_query(user_query, body)
+            
+            # Send email
+            self._send_email()
+            self._clear_pending_email()
+            
+        except Exception as e:
+            self.console.print(f"❌ Error generating email content: {str(e)}", style="red")
+    
+    def _extract_email_data_deterministic(self, query: str) -> dict:
+        """Extract email components using deterministic patterns."""
+        import re
+        
+        result = {
+            "to": None,
+            "subject": None,
+            "content_requirement": None,
+            "document_reference": None
+        }
+        
+        # Extract recipient email
+        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+        email_match = re.search(email_pattern, query)
+        if email_match:
+            result["to"] = email_match.group(0)
+        
+        # Extract subject
+        subject_match = re.search(r'subject\s*(?:would\s+be|is|:|-)\s*([^,.\n]+?)(?:\s*,|\s*with|\s*$)', query, re.IGNORECASE)
+        if subject_match:
+            result["subject"] = subject_match.group(1).strip()
+        
+        # Extract document reference - look for any file with common extensions
+        import os
+        document_extensions = ['.txt', '.md', '.pdf', '.doc', '.docx', '.json', '.csv']
+        
+        # Check for explicit "document" keyword
+        if "document" in query.lower():
+            # Look for available documents in the directory
+            if hasattr(self, 'documents_dir') and self.documents_dir.exists():
+                for file_path in self.documents_dir.iterdir():
+                    if file_path.is_file() and file_path.suffix.lower() in document_extensions:
+                        result["document_reference"] = file_path.name
+                        break
+        else:
+            # Look for specific file mentions (e.g., "resume.txt", "profile.md", etc.)
+            words = query.split()
+            for word in words:
+                # Remove punctuation and check if it looks like a filename
+                clean_word = word.strip('.,!?()[]{}":;')
+                if '.' in clean_word and any(clean_word.lower().endswith(ext) for ext in document_extensions):
+                    # Verify the file exists
+                    if hasattr(self, 'documents_dir'):
+                        potential_file = self.documents_dir / clean_word
+                        if potential_file.exists():
+                            result["document_reference"] = clean_word
+                            break
+        
+        # Extract content requirements
+        query_lower = query.lower()
+        content_requirements = []
+        
+        # Check for bullet points with numbers
+        bullet_match = re.search(r'(\d+)\s*(?:bullet\s*)?points?', query_lower)
+        if bullet_match:
+            content_requirements.append(f"{bullet_match.group(1)} bullet points")
+        elif any(word in query_lower for word in ["bullet", "points", "list"]):
+            content_requirements.append("bullet points")
+        
+        # Check for other content types
+        if any(word in query_lower for word in ["summary", "summarize", "summarise"]):
+            content_requirements.append("summary")
+        elif any(word in query_lower for word in ["brief", "short", "concise"]):
+            content_requirements.append("brief")
+        elif any(word in query_lower for word in ["highlight", "key", "important", "main"]):
+            content_requirements.append("highlights")
+        elif any(word in query_lower for word in ["overview", "intro", "introduction"]):
+            content_requirements.append("overview")
+        
+        if content_requirements:
+            result["content_requirement"] = " ".join(content_requirements)
+        
+        return result
+    
+    def _generate_email_body_with_llm(self, user_query: str, content_requirement: str, document_reference: str) -> str:
+        """Generate email body using LLM based on requirements."""
+        try:
+            if not self.llm:
+                return "Email content based on your request."
+            
+            # Load document content if referenced
+            document_content = ""
+            if document_reference:
+                doc_path = self.documents_dir / document_reference
+                if doc_path.exists():
+                    document_content = doc_path.read_text(encoding='utf-8').strip()
+            
+            # Create prompt based on requirements
+            if content_requirement and document_content:
+                prompt = self._create_content_prompt(content_requirement, document_content, user_query)
+            elif document_content:
+                prompt = f"""Create professional email content based on the following document:
+
+{document_content}
+
+Make it suitable for email communication, professional and engaging."""
+            else:
+                prompt = f"""Create professional email content based on this request: {user_query}
+
+Make it professional, clear, and suitable for email communication."""
+            
+            response = self.llm.client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=600,
+                temperature=0.7
+            )
+            return response.choices[0].message.content.strip()
+            
+        except Exception as e:
+            return f"Error generating content: {str(e)}"
+    
+    def _create_content_prompt(self, requirement: str, document_content: str, user_query: str) -> str:
+        """Create specific prompt based on content requirement."""
+        if "bullet points" in requirement:
+            # Extract number if specified
+            import re
+            number_match = re.search(r'(\d+)', requirement)
+            num_points = number_match.group(1) if number_match else "5"
+            
+            return f"""Create {num_points} professional bullet points from the following content for an email:
+
+{document_content}
+
+Format as:
+• Point 1
+• Point 2
+etc.
+
+Make them concise, professional, and suitable for email communication."""
+        
+        elif "summary" in requirement:
+            return f"""Create a professional summary of the following content for an email:
+
+{document_content}
+
+Make it:
+- Professional and engaging
+- 2-3 paragraphs maximum
+- Suitable for email communication
+- Highlight key achievements and information"""
+        
+        elif "brief" in requirement:
+            return f"""Create a brief, professional version of the following content for an email:
+
+{document_content}
+
+Make it:
+- Very concise (1-2 paragraphs)
+- Professional tone
+- Include only the most important points"""
+        
+        elif "highlights" in requirement:
+            return f"""Extract the key highlights from the following content for an email:
+
+{document_content}
+
+Make it:
+- Professional and engaging
+- 3-4 key highlights
+- Focus on most important achievements
+- Suitable for email communication"""
+        
+        elif "overview" in requirement:
+            return f"""Create a professional overview from the following content for an email:
+
+{document_content}
+
+Make it:
+- Professional introduction style
+- 1-2 paragraphs
+- Focus on background and key qualifications
+- Suitable for email communication"""
+        
+        else:
+            return f"""Create professional email content based on: {user_query}
+
+Using this content: {document_content}
+
+Make it professional, clear, and suitable for email communication."""
+    
+    def _generate_subject_from_query(self, user_query: str, body: str) -> str:
+        """Generate subject line from query and body."""
+        try:
+            if not self.llm:
+                return "Email Subject"
+            
+            prompt = f"""Based on this email request and content, suggest a professional email subject line:
+
+Request: {user_query}
+Content preview: {body[:200]}...
+
+Generate a concise, professional subject line (max 8 words):"""
+            
+            response = self.llm.client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=50,
+                temperature=0.7
+            )
+            return response.choices[0].message.content.strip().strip('"')
+        except:
+            return "Email Subject"
+    
+    def _execute_email_draft(self, email_content: dict):
+        """Execute an email draft generated by agents."""
+        try:
+            if ToolType.GMAIL in self.tool_agents:
+                gmail_agent = self.tool_agents[ToolType.GMAIL]
+                result = gmail_agent.execute("send_email", {
+                    "to": email_content["to"],
+                    "subject": email_content["subject"],
+                    "content": email_content["body"]
+                })
+                
+                if result.success:
+                    self.console.print(f"✅ Email sent to {email_content['to']}", style="green")
+                    self.console.print(f"📧 Subject: {email_content['subject']}", style="cyan")
+                    self.notifier.send_notification("task_completed", "Email sent successfully!")
+                else:
+                    self.console.print(f"❌ Failed to send email: {result.error}", style="red")
+            else:
+                self.console.print("❌ Gmail not configured", style="red")
+        except Exception as e:
+            self.console.print(f"❌ Error sending email: {str(e)}", style="red")
 
 
 def main():
