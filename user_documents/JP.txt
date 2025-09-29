@@ -1,0 +1,16 @@
+Hello,
+
+Confession: this isn’t going to be the usual cover letter full of keywords. Instead, let me explain why JPMorgan’s Applied AI/ML Associate role feels like the natural progression of my journey.
+
+I began my career in enterprise software at Amdocs, where precision wasn’t optional, it was the baseline. Migrating legacy systems, refining billing pipelines, and ensuring real-time accuracy taught me the discipline of building software that businesses can trust. That discipline carried forward when I transitioned into AI, pursuing my MSc in Artificial Intelligence at King’s College London. There, I immersed myself in the science of multi-agent systems, reasoning, computer vision, and AI ethics, while also competing in (and winning) hackathons where I built agentic architectures from scratch.
+
+Today, as an AI Solutions Engineer at Cogniwide UK, I design and deploy end-to-end AI systems: evaluating state-of-the-art frameworks, architecting scalable pipelines, and coding production-ready solutions. My work has spanned RAG pipelines, memory-augmented agents, and applied LLMs, experiences directly aligned with JPMorgan’s mission to revolutionize how the Private Bank services its clients.
+
+What excites me most about this role is the focus on autonomous AI agents and GenAI solutions in a domain where trust, accuracy, and resilience are non-negotiable. Financial systems operate under the same constraints I’ve faced in telecom and enterprise AI: latency must be low, predictions must be reliable, and decisions must be explainable. The chance to bring my background in applied AI, agentic architectures, and cloud-ready deployment (AWS, Lambda, S3, Glue) into the world of private banking feels like a challenge worth pursuing.
+
+I may not consider myself extraordinary, but I adapt fast, experiment relentlessly, and thrive in collaborative environments where curiosity drives solutions. What I bring is not just proficiency in Python, SQL, PyTorch, and HuggingFace, but the ability to turn research into resilient, production-grade systems that create real business value.
+
+I’d welcome the opportunity to connect and explore how I can contribute to JPMorgan’s vision of transforming private banking through AI.
+
+Warm regards,
+Yash Kalwar
