@@ -1,110 +1,137 @@
-# CrewAI Agent Workflow System
+# Autonomous AI Workflow System
 
-A sophisticated CLI-based agent workflow system built with CrewAI that automates tasks across Gmail, HubSpot CRM, and Google Calendar with intelligent planning, review, and execution capabilities.
+A streamlined CLI-based workflow system that automates tasks across Gmail, Pipedrive CRM, and Calendly with intelligent hybrid processing combining deterministic logic and LLM capabilities.
 
 ## 🌟 Features
 
-- **🧠 Intelligent Task Planning**: Breaks down complex user requests into actionable steps
-- **🔍 Automated Quality Review**: Validates drafts with confidence scoring before execution
-- **🛠️ Multi-Tool Integration**: Seamlessly works with Gmail, HubSpot, and Google Calendar
-- **💾 Persistent Memory**: Uses ChromaDB to remember past interactions and learn from them
-- **📢 Real-time Notifications**: Provides live updates on task progress
-- **🎯 Typed Contracts**: Fully typed interfaces for reliability and maintainability
-- **📄 Document Summaries**: Pull meeting notes from uploaded PDF/DOCX/TXT files for email drafts
+- **🤖 Hybrid Processing**: Combines deterministic pattern matching with LLM intelligence
+- **📧 Smart Email System**: Step-by-step prompting for simple requests, auto-generation for complex ones
+- **🛠️ Multi-Tool Integration**: Gmail, Pipedrive CRM, and Calendly integration
+- **📄 Document Processing**: AI-powered summaries, bullet points, and content extraction
+- **💾 Persistent Memory**: ChromaDB-based interaction history
+- **📢 Real-time Notifications**: Live progress updates
+- **🎯 Type Safety**: Fully typed interfaces with Pydantic models
 
 ## 🏗️ Architecture
 
-The system follows a modular agent-based architecture:
+The system uses a **hybrid approach** that combines the best of both worlds:
 
 ```
+┌─────────────────────────────────────────────────────────────┐
+│                    HYBRID SYSTEM                            │
+├─────────────────────────────────────────────────────────────┤
+│  Deterministic Logic        │        LLM Intelligence       │
+│  ├─ Email field extraction  │  ├─ Document summarization    │
+│  ├─ CRM data parsing        │  ├─ Content generation        │
+│  ├─ One-at-a-time prompting │  ├─ Subject line creation     │
+│  └─ Pattern matching        │  └─ Natural language processing│
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Planner       │───▶│  Deliberation    │───▶│   Reviewer      │
-│   Agent         │    │  Core            │    │   Agent         │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-         │                       │                       │
-         ▼                       ▼                       ▼
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Memory        │    │   Tool Agents    │    │   Notifier      │
-│   Agent         │    │ (Gmail/HubSpot/  │    │   Agent         │
-│  (ChromaDB)     │    │   Calendar)      │    │                 │
+│   Tool Agents   │    │   Memory Agent   │    │  Notifier Agent │
+│ (Gmail/Pipedrive│    │   (ChromaDB)     │    │                 │
+│   /Calendly)    │    │                  │    │                 │
 └─────────────────┘    └──────────────────┘    └─────────────────┘
 ```
 
 ### Core Components
 
-1. **Planner Agent**: Analyzes user queries and creates structured execution plans
-2. **Deliberation Core**: Generates high-quality drafts based on plans
-3. **Reviewer Agent**: Validates drafts with confidence scoring and issue detection
-4. **Tool Agents**: Execute actions on external services (Gmail, HubSpot, Calendar)
-5. **Memory Agent**: Stores and retrieves interaction history using ChromaDB
-6. **Notifier Agent**: Provides real-time progress updates
+1. **Hybrid Email System**: Deterministic extraction + LLM content generation
+2. **Tool Agents**: Direct API integrations (Gmail, Pipedrive, Calendly)
+3. **Memory Agent**: ChromaDB-based interaction storage
+4. **Document Manager**: Smart file processing with LLM summaries
+5. **Notifier Agent**: Progress updates and notifications
 
 ## 🚀 Quick Start
 
 ### Prerequisites
 
 - Python 3.11+
-- pip package manager
+- OpenAI API key (for LLM features)
 
 ### Installation
 
-1. **Clone or download the project files**
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/Yashkalwar/autonomous_P1.git
+   cd autonomous1
+   ```
 
 2. **Install dependencies**:
    ```bash
    pip install -r requirements.txt
    ```
 
-3. **Run the application**:
+3. **Set up environment variables** in `.env`:
+   ```env
+   # OpenAI (Required for LLM features)
+   OPENAI_API_KEY=your_openai_api_key
+   
+   # Gmail (Optional)
+   GMAIL_SENDER=your_email@gmail.com
+   GMAIL_AUTH_METHOD=app_password
+   GMAIL_APP_PASSWORD=your_16_char_app_password
+   
+   # Pipedrive CRM (Optional)
+   PIPEDRIVE_API_TOKEN=your_pipedrive_token
+   PIPEDRIVE_DOMAIN=yourcompany.pipedrive.com
+   
+   # Calendly (Optional)
+   CALENDLY_TOKEN=your_calendly_token
+   CALENDLY_EVENT_TYPE_UUID=your_event_type_uuid
+   CALENDLY_SCHEDULING_LINK=https://calendly.com/your-link
+   ```
+
+4. **Run the application**:
    ```bash
    python cli.py
    ```
 
-### First Run
-
-1. **API Credentials Setup** (one-time): populate a `.env` file with your API tokens before launching the CLI.
-   - **Gmail**: supply `GMAIL_SENDER`, choose `GMAIL_AUTH_METHOD` (`app_password` or `oauth`), and provide either `GMAIL_APP_PASSWORD` *or* `GMAIL_OAUTH_TOKEN_PATH` / `GMAIL_OAUTH_TOKEN_JSON`.
-   - **HubSpot & Google Calendar**: set `HUBSPOT_API_TOKEN` and `CALENDAR_API_TOKEN` as needed.
-
-2. **Interactive Mode**: After setup, you can start making requests like:
-
-   - "Send an email to john@example.com about the project update"
-   - "Schedule a meeting for tomorrow at 2 PM"
-   - "Log a customer interaction in CRM"
-
 ## 📋 Usage Examples
 
-### Email Tasks
+### Simple Email (Step-by-Step)
 ```
-💬 What can I help you with? Send an email to team@company.com about the quarterly review
-
-🧠 [PLANNER] Created plan with 1 steps, requires tools: [ToolType.GMAIL]
-📝 [DELIBERATION] Generated email draft: abc123...
-🔍 [REVIEWER] Draft abc123... - Score: 0.85, Approved: True
-📧 [GMAIL] Email sent to team@company.com: Re: Send an email to team@company.com about the quarterly review
-✅ [NOTIFICATION] Task completed successfully!
-```
-
-### Calendar Tasks
-```
-💬 What can I help you with? Schedule a team meeting for next Monday at 10 AM
-
-🧠 [PLANNER] Created plan with 1 steps, requires tools: [ToolType.CALENDAR]
-📝 [DELIBERATION] Generated calendar_event draft: def456...
-🔍 [REVIEWER] Draft def456... - Score: 0.90, Approved: True
-📅 [CALENDAR] Event created: Meeting: Schedule a team meeting for next Monday at 10 AM at 2024-01-15T14:00:00
-✅ [NOTIFICATION] Task completed successfully!
+💬 What can I help you with? I want to send an email
+❓ Please provide the recipient email address: john@example.com
+✅ Got recipient: john@example.com
+❓ What should be the email subject? Meeting follow-up
+✅ Got subject: Meeting follow-up
+❓ What should be the email content? Thanks for the great meeting today!
+✅ Got content (32 characters)
+📧 [GMAIL] Email sent to john@example.com via SMTP
+✅ Email sent to john@example.com
 ```
 
-### CRM Tasks
+### Smart Document Processing
 ```
-💬 What can I help you with? Create a contact for sarah@newclient.com
+💬 What can I help you with? Send 5 bullet points from resume.txt to hr@company.com
+❓ Please provide the recipient email address: hr@company.com
+✅ Got recipient: hr@company.com
+✅ Loaded content from resume.txt (2254 characters)
+✅ Got processed content (245 characters)
+📧 [GMAIL] Email sent to hr@company.com via SMTP
+✅ Email sent to hr@company.com
+```
 
-🧠 [PLANNER] Created plan with 1 steps, requires tools: [ToolType.HUBSPOT]
-📝 [DELIBERATION] Generated crm_log draft: ghi789...
-🔍 [REVIEWER] Draft ghi789... - Score: 0.88, Approved: True
-👤 [HUBSPOT] Contact created: sarah@newclient.com
-✅ [NOTIFICATION] Task completed successfully!
+### CRM Contact Management
+```
+💬 What can I help you with? Add contact to CRM
+❓ Please provide the contact name: Sarah Johnson
+✅ Got name: Sarah Johnson
+❓ Please provide the contact email address: sarah@newclient.com
+✅ Got email: sarah@newclient.com
+✅ Contact 'Sarah Johnson' added to Pipedrive with email sarah@newclient.com
+```
+
+### Calendly Availability
+```
+💬 What can I help you with? Check my availability for tomorrow
+📅 Available slots for 2024-01-16:
+  1. 9:00 AM - 9:30 AM
+  2. 2:00 PM - 2:30 PM
+  3. 4:00 PM - 4:30 PM
+🔗 Book via Calendly: https://calendly.com/your-link
 ```
 
 ## 🎛️ CLI Commands
@@ -115,110 +142,110 @@ The system follows a modular agent-based architecture:
 - `clear` - Clear the terminal screen
 - `quit`/`exit`/`q` - Exit the application
 
-## 🗂️ Document Summaries
+## 📄 Document Processing Features
 
-- Place meeting notes and reference files in `./user_documents`.
-- The CLI automatically grabs the most recently updated PDF/DOCX/TXT/Markdown file when a summary is needed.
-- If you prefer a specific document, reply with its filename (for example, `meeting.pdf`) or paste the relevant text.
+### Supported Formats
+- `.txt`, `.md`, `.pdf`, `.doc`, `.docx`, `.json`, `.csv`
+
+### Processing Types
+- **Bullet Points**: `"5 bullet points from document.txt"`
+- **Line Summaries**: `"3 line summary of report.md"`
+- **General Summaries**: `"summary of meeting_notes.txt"`
+- **Highlights**: `"key highlights from proposal.pdf"`
+- **Brief Content**: `"brief overview of document"`
+
+### Usage
+1. Place documents in `./user_documents/` folder
+2. Reference by filename: `"summary of resume.txt"`
+3. Or use generic: `"bullet points from document"`
 
 ## 🔧 Configuration
 
-### Confidence Threshold
-The reviewer agent uses a confidence threshold (default: 0.7) to determine if drafts need user approval:
-- **≥ 0.8**: High confidence (auto-approved)
-- **0.6-0.79**: Medium confidence (may require review)
-- **< 0.6**: Low confidence (requires user review)
-
 ### Environment Variables
-The application reads credentials from a `.env` file (loaded via `python-dotenv`). Set one of the following options for each provider before launching the CLI:
 
-- `GMAIL_SENDER` – Email address used as the sender.
-- `GMAIL_AUTH_METHOD` – `app_password` or `oauth`. If omitted, the method is inferred from the provided secrets.
-- `GMAIL_APP_PASSWORD` – 16-character Gmail app password (required when `GMAIL_AUTH_METHOD=app_password`).
-- `GMAIL_OAUTH_TOKEN_PATH` – Filesystem path to an OAuth token JSON file (used when `GMAIL_AUTH_METHOD=oauth`).
-- `GMAIL_OAUTH_TOKEN_JSON` – Raw OAuth token JSON (alternative to the path; the CLI stores it under `memory_db/credentials/`).
-- `HUBSPOT_API_TOKEN` – HubSpot private app token.
-- `CALENDAR_API_TOKEN` – Google Calendar API token.
-- `OPENAI_API_KEY` – Enables conversational responses and draft generation.
-- `OPENAI_MODEL` – Optional override for the OpenAI model name (defaults to `gpt-4o-mini`).
+**Required:**
+- `OPENAI_API_KEY` - OpenAI API key for LLM features
 
-If none of the variables are supplied the CLI runs in demo mode (no live API calls).
+**Optional (Gmail):**
+- `GMAIL_SENDER` - Your Gmail address
+- `GMAIL_AUTH_METHOD` - `app_password` or `oauth`
+- `GMAIL_APP_PASSWORD` - 16-character app password
+- `GMAIL_OAUTH_TOKEN_PATH` - Path to OAuth token file
 
-### Memory Persistence
+**Optional (Pipedrive):**
+- `PIPEDRIVE_API_TOKEN` - Pipedrive API token
+- `PIPEDRIVE_DOMAIN` - Your Pipedrive domain
 
-ChromaDB stores interaction history in the `./chroma_db` directory. This includes:
-- User queries and generated plans
-- Execution results and outcomes
-- Sentiment analysis and tags
-- Timestamps for temporal analysis
+**Optional (Calendly):**
+- `CALENDLY_TOKEN` - Calendly API token
+- `CALENDLY_EVENT_TYPE_UUID` - Event type UUID
+- `CALENDLY_SCHEDULING_LINK` - Your Calendly link
+
+### Memory Storage
+
+ChromaDB stores interaction history in `./chroma_db/`:
+- User queries and responses
+- Email content and metadata
+- CRM interactions
+- Timestamps and sentiment analysis
 
 ## 🛠️ Development
 
 ### Project Structure
 ```
 autonomous1/
-├── cli.py              # Main CLI interface
-├── agents.py           # CrewAI agent implementations
-├── tools.py            # Tool agent implementations
+├── cli.py              # Main CLI interface (hybrid logic)
+├── agents.py           # Notification agent (simplified)
+├── tools.py            # Tool integrations (Gmail/Pipedrive/Calendly)
 ├── memory.py           # ChromaDB memory management
-├── contracts.py        # Typed data contracts
-├── document_manager.py # Document ingestion helpers
-├── requirements.txt    # Python dependencies
-├── README.md           # This file
-└── user_documents/     # Drop meeting notes for summaries
+├── contracts.py        # Type definitions and data models
+├── document_manager.py # Document processing utilities
+├── llm.py             # OpenAI LLM client
+├── config_store.py    # Configuration management
+├── requirements.txt   # Python dependencies
+└── user_documents/    # Document storage folder
 ```
 
 ### Key Design Principles
 
-1. **Modularity**: Each component has a single responsibility
-2. **Type Safety**: All interfaces use Pydantic models for validation
-3. **Error Handling**: Graceful degradation and informative error messages
-4. **Extensibility**: Easy to add new tools and agents
-5. **User Experience**: Rich CLI interface with progress indicators
+1. **Hybrid Approach**: Deterministic logic + LLM intelligence
+2. **User-Friendly**: Step-by-step prompting for simple requests
+3. **Smart Automation**: Auto-generation for complex document tasks
+4. **Type Safety**: Pydantic models for data validation
+5. **Modularity**: Clean separation of concerns
+6. **Error Handling**: Graceful degradation and helpful messages
 
-### Adding New Tools
+### Code Cleanup (Recent)
 
-To add a new tool integration:
-
-1. **Define the tool type** in `contracts.py`:
-   ```python
-   class ToolType(str, Enum):
-       # ... existing tools
-       NEW_TOOL = "new_tool"
-   ```
-
-2. **Create the tool agent** in `tools.py`:
-   ```python
-   class NewToolAgent(ToolAgent):
-       def execute(self, action: str, parameters: Dict[str, Any]) -> ToolExecution:
-           # Implementation here
-   ```
-
-3. **Update the CLI** to initialize the new tool in `cli.py`
+The codebase was recently streamlined:
+- **Removed**: Old agent-based planning system (~800 lines)
+- **Removed**: Unused review and deliberation agents
+- **Simplified**: Direct LLM calls instead of complex orchestration
+- **Improved**: Document processing with smart content generation
+- **Result**: 46% code reduction while maintaining functionality
 
 ## 🔍 Troubleshooting
 
 ### Common Issues
 
-1. **ChromaDB Permission Errors**: Ensure write permissions in the project directory
-2. **Missing Dependencies**: Run `pip install -r requirements.txt`
-3. **API Token Issues**: Verify tokens are valid and have required permissions
+1. **OpenAI API Errors**: Check your API key and credits
+2. **Gmail Authentication**: Verify app password or OAuth setup
+3. **Document Processing**: Ensure files are in `user_documents/` folder
+4. **Memory Errors**: Check write permissions for `chroma_db/` directory
 
-### Debug Mode
-For detailed logging, modify the agent verbose settings in `agents.py`:
-```python
-self.agent = Agent(
-    # ... other parameters
-    verbose=True  # Enable detailed logging
-)
-```
+### Debug Tips
+
+- Use `status` command to check component health
+- Check `.env` file for correct variable names
+- Verify file extensions are supported for document processing
+- Test with simple requests first before complex ones
 
 ## 🤝 Contributing
 
 1. Fork the repository
 2. Create a feature branch
-3. Make your changes with proper type hints
-4. Test thoroughly with different scenarios
+3. Make changes with proper type hints
+4. Test with different scenarios
 5. Submit a pull request
 
 ## 📄 License
@@ -227,6 +254,7 @@ This project is provided as-is for educational and demonstration purposes.
 
 ## 🙏 Acknowledgments
 
-- **CrewAI**: For the excellent agent orchestration framework
-- **ChromaDB**: For persistent vector storage capabilities
-- **Rich**: For beautiful CLI formatting and user experience
+- **OpenAI**: For GPT models powering the LLM features
+- **ChromaDB**: For vector storage and memory capabilities
+- **Rich**: For beautiful CLI formatting
+- **Pydantic**: For robust data validation
